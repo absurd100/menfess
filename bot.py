@@ -158,4 +158,6 @@ def keep_alive():
     t.start()
 
 if __name__ == '__main__':
-    main()
+    keep_alive()  # Menjalankan server web kecil agar Render tidak mematikan bot
+    main()        # Menjalankan bot Telegram
+
