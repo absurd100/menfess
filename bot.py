@@ -1,163 +1,286 @@
-import logging
-import html
-import re
-import os
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ParseMode, ChatAction
+import logging, html, os, json, sys, subprocess, asyncio, signal
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.constants import ParseMode
 
-# --- KONFIGURASI ---
-TOKEN = '7887862356:AAHTa0kxaOAcDh7kAB7wOJl-4nD5oWLjtHE'
-CHANNEL_ID = '@GALLERY_TPV'
-BOT_USERNAME = 'agimenfessbot'
-NAMA_BOT = 'MENFESSKU'
-OWNER_ID = 7411619973  # ID Owner Anda
+# --- 1. KONFIGURASI UTAMA ---
+TOKEN = os.getenv("BOT_TOKEN", '8412972026:AAHkUMziUGDo__JGGoQUf8bKKnazX4P-sV8')
+DEFAULT_CHANNEL = os.getenv("CH_ID", '@GALLERY_TPV')
+MAIN_OWNER_ID = 7411619973  
+OWNER_ID = int(os.getenv("OWN_ID", MAIN_OWNER_ID))
 
-# File penyimpanan agar data tidak hilang saat restart
-BAN_FILE = "banned_users.txt"
-REGEX_FILE = "regex_filters.txt"
+IS_CLONE = os.getenv("IS_CLONE", "False") == "True"
+suffix = f"_{OWNER_ID}" if IS_CLONE else ""
+
+USER_DATA_FILE = f"user_stats{suffix}.json"
+CONFIG_FILE = f"bot_config{suffix}.json"
+USERS_LIST_FILE = f"all_users{suffix}.json"
+BAN_FILE = f"banned_users{suffix}.json"
+CLONE_DB = "permanent_clones.json"
+POST_MAP_FILE = "post_mapping.json"
+
+DEFAULT_TEMPLATE = "✨ <b>𝐍𝐄𝐖 𝐌𝐄𝐍𝐅𝐄𝐒𝐒!</b> ✨\n\n{TEXT}\n\n👤 <b>Sender:</b> {SENDER}"
+
+# --- KEYBOARD ---
+MAIN_KEYBOARD = ReplyKeyboardMarkup([['👤 Kirim Anonim', '📝 Tampilkan Nama'], ['💳 Isi Kuota (Bayar)', '📊 Cek Kuota'], ['🤖 CLONE']], resize_keyboard=True)
+OWNER_KEYBOARD = ReplyKeyboardMarkup([['⚙️ CUSTOM POST', '📢 BROADCAST'], ['🔓 MODE GRATIS', '🔒 MODE BAYAR'], ['👤 MENU USER', '📋 LIST CLONE']], resize_keyboard=True)
+CLONE_ADMIN_KEYBOARD = ReplyKeyboardMarkup([['⚙️ CUSTOM POST', '📢 BROADCAST'], ['🔓 MODE GRATIS', '🔒 MODE BAYAR'], ['👤 MENU USER']], resize_keyboard=True)
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- FUNGSI DATABASE SEDERHANA ---
-def load_data(file_name):
-    if not os.path.exists(file_name): return []
+# --- 2. DATABASE HELPER ---
+def load_json(file_name):
+    if not os.path.exists(file_name):
+        default = [] if any(x in file_name for x in ["all_users", "clones", "permanent", "banned"]) else {}
+        with open(file_name, "w") as f: json.dump(default, f)
+        return default
     with open(file_name, "r") as f:
-        return [line.strip() for line in f.readlines() if line.strip()]
-
-def save_data(file_name, data):
-    with open(file_name, "w") as f:
-        for item in data: f.write(f"{item}\n")
-
-banned_users = set(load_data(BAN_FILE))
-regex_filters = load_data(REGEX_FILE)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    if user_id in banned_users:
-        await update.message.reply_text("🚫 Anda telah diblokir dari bot ini.")
-        return
-
-    keyboard = [['👤 Kirim Anonim', '📝 Tampilkan Nama']]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    welcome_text = (
-        f"✨ <b>Selamat Datang di {NAMA_BOT}</b> ✨\n\n"
-        "Silakan pilih identitas pengiriman kamu terlebih dahulu:"
-    )
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-
-# --- FITUR OWNER: MANAJEMEN BAN & REGEX ---
-async def owner_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID: return
-
-    text = update.message.text
-    cmd = text.split(maxsplit=1)
-    
-    if text.startswith("/addregex") and len(cmd) > 1:
-        pattern = cmd[1]
         try:
-            re.compile(pattern)
-            regex_filters.append(pattern)
-            save_data(REGEX_FILE, regex_filters)
-            await update.message.reply_text(f"✅ Regex ditambahkan: <code>{pattern}</code>", parse_mode=ParseMode.HTML)
-        except: await update.message.reply_text("❌ Regex tidak valid.")
+            data = json.load(f)
+            return data if data is not None else []
+        except: return []
 
-    elif text.startswith("/listregex"):
-        msg = "🚫 <b>Daftar Regex:</b>\n" + "\n".join([f"{i+1}. <code>{p}</code>" for i, p in enumerate(regex_filters)])
-        await update.message.reply_text(msg if regex_filters else "Daftar kosong.", parse_mode=ParseMode.HTML)
+def save_json(file_name, data):
+    with open(file_name, "w") as f: json.dump(data, f, indent=4)
 
-    elif text.startswith("/delregex") and len(cmd) > 1:
+def is_banned(uid):
+    return str(uid) in load_json(BAN_FILE)
+
+# --- 3. CALLBACK HANDLER (PID KILL & ACC KUOTA) ---
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != OWNER_ID: return
+    data = query.data
+
+    if data.startswith("ban_"):
+        uid = data.split("_")[1]
+        banned = load_json(BAN_FILE)
+        if uid not in banned: banned.append(uid); save_json(BAN_FILE, banned)
+        await query.answer("User Berhasil di Ban!")
+        await query.edit_message_caption(caption=query.message.caption + "\n\n🚫 <b>STATUS: BANNED</b>", parse_mode=ParseMode.HTML)
+
+    elif data.startswith("unban_"):
+        uid = data.split("_")[1]
+        banned = load_json(BAN_FILE)
+        if uid in banned: banned.remove(uid); save_json(BAN_FILE, banned)
+        await query.answer("Ban User Dicabut!")
+        await query.edit_message_caption(caption=query.message.caption + "\n\n✅ <b>STATUS: AKTIF</b>", parse_mode=ParseMode.HTML)
+
+    elif data.startswith("delclone_"):
         try:
-            idx = int(cmd[1]) - 1
-            removed = regex_filters.pop(idx)
-            save_data(REGEX_FILE, regex_filters)
-            await update.message.reply_text(f"🗑️ Dihapus: <code>{removed}</code>", parse_mode=ParseMode.HTML)
-        except: await update.message.reply_text("Nomor salah.")
+            idx = int(data.split("_")[1])
+            clones = load_json(CLONE_DB)
+            if 0 <= idx < len(clones):
+                removed = clones.pop(idx)
+                pid_to_kill = removed.get('pid')
+                if pid_to_kill:
+                    try: os.kill(pid_to_kill, signal.SIGTERM)
+                    except: pass
+                save_json(CLONE_DB, clones)
+                await query.edit_message_text(f"✅ Bot berhasil dihapus dan dimatikan.")
+            else: await query.answer("Gagal: Index tidak ditemukan")
+        except Exception as e: await query.answer(f"Error: {e}")
 
-    elif text.startswith("/ban") and len(cmd) > 1:
-        target = cmd[1]
-        banned_users.add(target)
-        save_data(BAN_FILE, list(banned_users))
-        await update.message.reply_text(f"🔨 User <code>{target}</code> di-ban.")
+    elif data.startswith("count_"):
+        _, tid, val = data.split("_")
+        val = max(1, int(val))
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("➖", callback_data=f"count_{tid}_{val-1}"), InlineKeyboardButton(f"💎 {val}", callback_data="n"), InlineKeyboardButton("➕", callback_data=f"count_{tid}_{val+1}")], [InlineKeyboardButton("✅ KONFIRMASI", callback_data=f"acc_{tid}_{val}")]])
+        await query.edit_message_reply_markup(reply_markup=kb)
 
-    elif text.startswith("/unban") and len(cmd) > 1:
-        target = cmd[1]
-        banned_users.discard(target)
-        save_data(BAN_FILE, list(banned_users))
-        await update.message.reply_text(f"🔓 User <code>{target}</code> di-unban.")
+    elif data.startswith("acc_"):
+        _, tid, val = data.split("_")
+        db_user = load_json(USER_DATA_FILE)
+        if tid not in db_user: db_user[tid] = {"kuota": 0}
+        db_user[tid]["kuota"] += int(val)
+        save_json(USER_DATA_FILE, db_user)
+        await query.edit_message_caption(caption=query.message.caption + f"\n\n✅ <b>BERHASIL +{val}</b>")
+        try: await context.bot.send_message(tid, f"✅ Pembayaran diterima! +{val} kuota ditambahkan.")
+        except: pass
 
-# --- HANDLER UTAMA ---
-async def handle_menfess(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    user_id = str(msg.from_user.id)
+    elif data == "cp_tpl":
+        context.user_data['edit_mode'] = 'template'
+        await query.message.reply_text("📝 Kirim template baru. Gunakan {TEXT} & {SENDER}.")
+    elif data == "cp_ch":
+        context.user_data['edit_mode'] = 'channel'
+        await query.message.reply_text("📢 Kirim username channel baru (@Channel).")
     
-    if user_id in banned_users: return
+    await query.answer()
 
-    keyboard = [['👤 Kirim Anonim', '📝 Tampilkan Nama']]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-
-    if msg.text in ['👤 Kirim Anonim', '📝 Tampilkan Nama']:
-        context.user_data['mode'] = msg.text
-        await msg.reply_text(f"✅ Mode: <b>{msg.text}</b>\nKirim pesan teks kamu:", reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.HTML)
-        return
-
-    mode = context.user_data.get('mode')
-    if not mode:
-        await msg.reply_text("⚠️ Pilih identitas dulu:", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-        return
-
-    if not msg.text:
-        await msg.reply_text("⚠️ Hanya teks yang diizinkan.", reply_markup=reply_markup)
-        return
-
-    # Filter Regex
-    for pattern in regex_filters:
-        if re.search(pattern, msg.text, re.IGNORECASE):
-            await msg.reply_text("🚫 Pesan mengandung pola dilarang!", reply_markup=reply_markup)
-            return
-
-    # Kirim ke Channel
-    sender = f'👤 <b>From: <a href="tg://user?id={user_id}">{html.escape(msg.from_user.full_name)}</a></b>' if mode == '📝 Tampilkan Nama' else "👤 <b>From: Anonim</b>"
-    header = "━━━━━━━━━━━━━━━━━━━━\n💌 <b>NEW MENFESS!</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
-    footer = f"\n\n{sender}\n📅 <i>Sent via</i> @{BOT_USERNAME}\n━━━━━━━━━━━━━━━━━━━━"
+# --- 4. NOTIFIKASI KOMENTAR ---
+async def handle_comments(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.reply_to_message: return
     
-    try:
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=f"{header}“ {html.escape(msg.text)} ”{footer}", parse_mode=ParseMode.HTML)
+    msg_reply = update.message.reply_to_message
+    original_msg_id = None
+    
+    if msg_reply.forward_from_message_id:
+        original_msg_id = str(msg_reply.forward_from_message_id)
+    elif msg_reply.forward_origin and hasattr(msg_reply.forward_origin, 'message_id'):
+        original_msg_id = str(msg_reply.forward_origin.message_id)
+
+    if not original_msg_id: return
+
+    post_map = load_json(POST_MAP_FILE)
+    sender_id = post_map.get(original_msg_id)
+    if sender_id:
+        try:
+            cfg = load_json(CONFIG_FILE)
+            target = cfg.get("target_channel", DEFAULT_CHANNEL).replace('@','')
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Lihat Komentar 💬", url=f"https://t.me/{target}/{original_msg_id}")]])
+            await context.bot.send_message(chat_id=sender_id, text="🔔 <b>Notifikasi!</b>\nSeseorang baru saja mengomentari Menfess Anda.", reply_markup=kb, parse_mode=ParseMode.HTML)
+        except: pass
+
+# --- 5. HANDLING PESAN ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.message: return
+    if update.effective_chat.type != "private": return 
+    
+    uid_int = update.effective_user.id
+    uid = str(uid_int); msg = update.message; text = msg.text or msg.caption or ""
+    
+    if is_banned(uid_int): return 
+
+    # Foto Pembayaran
+    if msg.photo and uid_int != OWNER_ID:
+        kb_owner = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➖", callback_data=f"count_{uid}_4"), InlineKeyboardButton("💎 5", callback_data="n"), InlineKeyboardButton("➕", callback_data=f"count_{uid}_6")],
+            [InlineKeyboardButton("✅ KONFIRMASI", callback_data=f"acc_{uid}_5")]
+        ])
+        await context.bot.send_photo(OWNER_ID, photo=msg.photo[-1].file_id, caption=f"💳 <b>BUKTI PEMBAYARAN</b>\n🆔 ID: <code>{uid}</code>", reply_markup=kb_owner, parse_mode=ParseMode.HTML)
+        return await msg.reply_text("✅ Bukti pembayaran telah terkirim ke owner. Mohon tunggu konfirmasi.")
+
+    # Menu Owner
+    if uid_int == OWNER_ID:
+        if text == '📋 LIST CLONE':
+            clones = load_json(CLONE_DB)
+            if not clones: return await msg.reply_text("Belum ada bot kloning.")
+            kb = [[InlineKeyboardButton(f"Hapus {c.get('token')[:10]}...", callback_data=f"delclone_{i}")] for i, c in enumerate(clones)]
+            return await msg.reply_text("📋 <b>LIST CLONE</b>", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
+        if text == '⚙️ CUSTOM POST':
+            cfg = load_json(CONFIG_FILE)
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("📝 Template", callback_data="cp_tpl"), InlineKeyboardButton("📢 Channel", callback_data="cp_ch")]])
+            return await msg.reply_text(f"⚙️ <b>CUSTOM POST</b>\nTarget: {cfg.get('target_channel', DEFAULT_CHANNEL)}", reply_markup=kb, parse_mode=ParseMode.HTML)
+        if text == '📢 BROADCAST':
+            context.user_data['waiting_bc'] = True
+            return await msg.reply_text("📢 Silakan kirim pesan broadcast:")
+        if text == '🔓 MODE GRATIS':
+            cfg = load_json(CONFIG_FILE); cfg["gratis"] = True; save_json(CONFIG_FILE, cfg)
+            return await msg.reply_text("✅ Mode GRATIS aktif!")
+        if text == '🔒 MODE BAYAR':
+            cfg = load_json(CONFIG_FILE); cfg["gratis"] = False; save_json(CONFIG_FILE, cfg)
+            return await msg.reply_text("✅ Mode BERBAYAR aktif!")
+        if text == '👤 MENU USER':
+            return await msg.reply_text("Menu User Aktif.", reply_markup=MAIN_KEYBOARD)
+
+    # Capture State
+    if context.user_data.get('waiting_bc'):
+        context.user_data.pop('waiting_bc')
+        users = load_json(USERS_LIST_FILE)
+        for u in users:
+            try: await context.bot.send_message(u, text); await asyncio.sleep(0.05)
+            except: continue
+        return await msg.reply_text("✅ Broadcast selesai.")
+
+    if 'edit_mode' in context.user_data:
+        mode = context.user_data.pop('edit_mode'); cfg = load_json(CONFIG_FILE)
+        if mode == 'template': cfg["post_template"] = text
+        elif mode == 'channel': cfg["target_channel"] = text
+        save_json(CONFIG_FILE, cfg); return await msg.reply_text("✅ Diperbarui!")
+
+    if context.user_data.get('waiting_clone'):
+        token_input = text.strip(); context.user_data.pop('waiting_clone')
+        try:
+            env = os.environ.copy()
+            env.update({"BOT_TOKEN": token_input, "IS_CLONE": "True", "OWN_ID": str(uid_int)})
+            proc = subprocess.Popen([sys.executable, sys.argv[0]], env=env)
+            clones = load_json(CLONE_DB); clones.append({"token": token_input, "owner": uid_int, "pid": proc.pid}); save_json(CLONE_DB, clones)
+            return await msg.reply_text(f"✅ Clone Aktif! (PID: {proc.pid})")
+        except Exception as e: return await msg.reply_text(f"❌ Gagal: {e}")
+
+    # Menu User
+    if text == '🤖 CLONE':
+        context.user_data['waiting_clone'] = True
+        return await msg.reply_text("🤖 Kirim <b>Token Bot</b>:")
+    if text == '📊 Cek Kuota':
+        db = load_json(USER_DATA_FILE)
+        return await msg.reply_text(f"📊 Kuota: {db.get(uid, {}).get('kuota', 0)}")
+    if text == '💳 Isi Kuota (Bayar)':
+        return await msg.reply_text("💳 <b>CARA ISI KUOTA</b>\n\n1. Transfer ke: <b>[REKENING ANDA]</b>\n2. Kirim Foto Bukti ke sini.", parse_mode=ParseMode.HTML)
+    if text == '👤 Kirim Anonim':
+        context.user_data['mode'] = 'anonim'; return await msg.reply_text("Kirim pesan Menfess (Anonim):")
+    if text == '📝 Tampilkan Nama':
+        context.user_data['mode'] = 'nama'; return await msg.reply_text("Kirim pesan Menfess (Nama):")
+
+    # LOGIKA PENGIRIMAN MENFESS
+    list_tombol = ['👤 Kirim Anonim', '📝 Tampilkan Nama', '💳 Isi Kuota (Bayar)', '📊 Cek Kuota', '🤖 CLONE', '⚙️ CUSTOM POST', '📢 BROADCAST', '🔓 MODE GRATIS', '🔒 MODE BAYAR', '👤 MENU USER', '📋 LIST CLONE']
+    if not text.startswith('/') and text not in list_tombol:
+        db_user = load_json(USER_DATA_FILE); cfg = load_json(CONFIG_FILE)
+        kuota = db_user.get(uid, {}).get('kuota', 0)
         
-        # LOG ADMIN
-        log_text = f"🚨 <b>LOG:</b>\nID: <code>{user_id}</code>\nUser: {html.escape(msg.from_user.full_name)}\nPesan: {html.escape(msg.text)}"
-        await context.bot.send_message(chat_id=OWNER_ID, text=log_text, parse_mode=ParseMode.HTML)
+        if uid_int != OWNER_ID and not cfg.get("gratis", False) and kuota <= 0:
+            return await msg.reply_text("❌ Kuota habis!", reply_markup=MAIN_KEYBOARD)
 
-        context.user_data.clear()
-        await msg.reply_text(f"✅ <b>Terkirim!</b> Cek di {CHANNEL_ID}\nIngin kirim lagi? Pilih identitas:", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        await msg.reply_text(f"❌ Error: {e}", reply_markup=reply_markup)
+        mode = context.user_data.pop('mode', 'anonim')
+        full_name = html.escape(update.effective_user.full_name)
+        sender = "Anonim 👤" if mode == "anonim" else f"<a href='tg://user?id={uid_int}'>{full_name}</a> 📝"
+        final_text = cfg.get("post_template", DEFAULT_TEMPLATE).replace("{TEXT}", text).replace("{SENDER}", sender)
+        target = cfg.get("target_channel", DEFAULT_CHANNEL)
+
+        try:
+            # PENGIRIMAN UTAMA (Hanya 1 kali agar tidak ganda)
+            if msg.photo: snt = await context.bot.send_photo(target, msg.photo[-1].file_id, caption=final_text, parse_mode=ParseMode.HTML)
+            else: snt = await context.bot.send_message(target, final_text, parse_mode=ParseMode.HTML)
+            
+            # MAPPING UNTUK NOTIF KOMENTAR
+            p_map = load_json(POST_MAP_FILE); p_map[str(snt.message_id)] = uid_int; save_json(POST_MAP_FILE, p_map)
+
+            # Kurangi Kuota
+            if uid_int != OWNER_ID and not cfg.get("gratis", False):
+                db_user[uid]['kuota'] -= 1; save_json(USER_DATA_FILE, db_user)
+            
+            # Log ke Owner
+            log_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚫 BAN USER", callback_data=f"ban_{uid}"), InlineKeyboardButton("✅ UNBAN", callback_data=f"unban_{uid}")]])
+            log_cap = f"📩 <b>LOG MENFESS</b>\nDari: {full_name} (<code>{uid}</code>)\nIsi: {text}"
+            if msg.photo: await context.bot.send_photo(OWNER_ID, msg.photo[-1].file_id, caption=log_cap, reply_markup=log_kb, parse_mode=ParseMode.HTML)
+            else: await context.bot.send_message(OWNER_ID, log_cap, reply_markup=log_kb, parse_mode=ParseMode.HTML)
+            
+            link = f"https://t.me/{target.replace('@','')}/{snt.message_id}"
+            await msg.reply_text(f"✅ Terkirim! Sisa kuota: {db_user.get(uid, {}).get('kuota', 0)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Lihat Postingan ↗️", url=link)]]))
+        except Exception as e: await msg.reply_text(f"❌ Gagal: {e}")
+
+# --- 6. RUNNER ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid_int = update.effective_user.id
+    users = load_json(USERS_LIST_FILE)
+    if str(uid_int) not in users: users.append(str(uid_int)); save_json(USERS_LIST_FILE, users)
+    db = load_json(USER_DATA_FILE)
+    if str(uid_int) not in db: db[str(uid_int)] = {"kuota": 0}; save_json(USER_DATA_FILE, db)
+    kb = OWNER_KEYBOARD if (uid_int == MAIN_OWNER_ID and not IS_CLONE) else (CLONE_ADMIN_KEYBOARD if uid_int == OWNER_ID else MAIN_KEYBOARD)
+    await update.message.reply_text(f"👋 Halo! ID: {uid_int}", reply_markup=kb)
 
 def main():
+    if IS_CLONE:
+        clones = load_json(CLONE_DB)
+        if not any(c.get('token') == TOKEN for c in clones): sys.exit()
+
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler(["addregex", "listregex", "delregex", "ban", "unban"], owner_commands))
+    if not IS_CLONE:
+        clones = load_json(CLONE_DB); updated = []
+        for c in clones:
+            if c.get('token') == TOKEN: continue
+            try:
+                env = os.environ.copy()
+                env.update({"BOT_TOKEN": c['token'], "OWN_ID": str(c.get('owner', OWNER_ID)), "IS_CLONE": "True"})
+                proc = subprocess.Popen([sys.executable, sys.argv[0]], env=env)
+                c['pid'] = proc.pid; updated.append(c)
+            except: continue
+        save_json(CLONE_DB, updated)
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_menfess))
-    print("--- BOT MENFESS PRO 2026 ACTIVE ---")
-    app.run_polling(drop_pending_updates=True)
-
-from flask import Flask
-from threading import Thread
-
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is Running!"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.REPLY & filters.ChatType.GROUPS, handle_comments))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
+    app.run_polling()
 
 if __name__ == '__main__':
-    keep_alive()  # Menjalankan server web kecil agar Render tidak mematikan bot
-    main()        # Menjalankan bot Telegram
-
+    main()
