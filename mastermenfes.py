@@ -230,8 +230,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == '📊 Cek Kuota':
         db = load_json(USER_DATA_FILE)
         return await msg.reply_text(f"📊 Kuota: {db.get(uid, {}).get('kuota', 0)}")
-    if text == '💳 Isi Kuota (Bayar)':
-        return await msg.reply_text("💳 <b>CARA ISI KUOTA</b>\n\n1. Transfer ke: <b>[REKENING ANDA]</b>\n2. Kirim Foto Bukti ke sini.", parse_mode=ParseMode.HTML)
+    elif text == '💳 Isi Kuota (Bayar)':
+        cfg = load_json(CONFIG_FILE); qris = cfg.get("qris_link", "Belum diset oleh owner.")
+        context.user_data['step'] = 'PAY'
+        cap = f"💳 <b>Topup Kuota Menfess</b>\n\n1. Silakan scan QRIS di bawah atau klik link:\n🔗 {qris}\n\n2. Selesaikan pembayaran.\n3. <b>Kirim bukti screenshot</b> ke chat ini."
+        if "http" in qris: return await context.bot.send_photo(uid_int, qris, caption=cap, parse_mode=ParseMode.HTML)
+        else: return await msg.reply_text(cap, parse_mode=ParseMode.HTML)
     if text == '👤 Kirim Anonim':
         context.user_data['mode'] = 'anonim'; return await msg.reply_text("Kirim pesan Menfess (Anonim):")
     if text == '📝 Tampilkan Nama':
