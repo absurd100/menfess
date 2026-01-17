@@ -15,7 +15,7 @@ from telegram.constants import ParseMode, ChatType
 TOKEN = os.getenv("BOT_TOKEN")
 DEFAULT_CHANNEL = os.getenv("CH_ID")
 MAIN_OWNER_ID = os.getenv("OWN")  
-OWNER_ID = int(os.getenv("OWN_ID", MAIN_OWNER_ID))
+OWNER_ID = int(os.getenv("MAIN_OWNER_ID", "OWN_ID"))
 URL_GITHUB = 'https://raw.githubusercontent.com/absurd100/test/main/balasan.txt'
 
 IS_CLONE = os.getenv("IS_CLONE", "False") == "True"
