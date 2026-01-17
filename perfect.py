@@ -380,7 +380,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e: 
             # Menampilkan log error di terminal Termux agar tahu penyebab gagalnya
             print(f"Error Pengiriman: {e}")
-            await msg.reply_text(f"mohon periksa kembali")
+            await msg.reply_text(f"<i>channel menfess tidak terkonek dengan bot\nhubungi owner channel menfess agar memasukkan @usernamechannel nya ke bagian CUSTOM POST\njangan lupa dijadiin admin channel yah botnya 🤣</i>")
 
 # --- 5. FUNGSI UTAMA ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
