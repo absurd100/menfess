@@ -12,9 +12,9 @@ from telegram.ext import (
 from telegram.constants import ParseMode, ChatType
 
 # --- 1. KONFIGURASI UTAMA ---
-TOKEN = os.getenv("BOT_TOKEN", 'TOKENKU')
-DEFAULT_CHANNEL = os.getenv("CH_ID", 'CHKU')
-MAIN_OWNER_ID = os.getenv("OWN", 'IDKU')  
+TOKEN = os.getenv("BOT_TOKEN")
+DEFAULT_CHANNEL = os.getenv("CH_ID")
+MAIN_OWNER_ID = os.getenv("OWN")  
 OWNER_ID = int(os.getenv("OWN_ID", MAIN_OWNER_ID))
 URL_GITHUB = 'https://raw.githubusercontent.com/absurd100/test/main/balasan.txt'
 
